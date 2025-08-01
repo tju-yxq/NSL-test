@@ -49,7 +49,7 @@ def layer_norm(x, g_b, eps:float = 1e-5):
     # layer_norm函数实现层归一化
     # 1. 计算均值和方差。
     mean = torch.mean(x, dim=-1, keepdim=True)
-    variance = torch.mean(x, dim=-1, keepdim=True, unbiased=False)
+    variance = torch.var(x, dim=-1, keepdim=True, unbiased=False)
     # 2. 归一化。根据 LayerNorm 公式 (x - mean) / sqrt(variance + eps)。
     #    eps 是为了防止方差为零导致除零错误。
     x_normalized = (x - mean) / torch.sqrt(variance + eps)
@@ -200,6 +200,8 @@ def mha(x, attn, n_head, kv_cache=None):  # [n_seq, n_embd] -> [n_seq, n_embd]
     # Out projection
     x = linear(x, c_proj)  # [n_seq, n_embd] -> [n_seq, n_embd]
 
+    return x
+
 
 def transformer_block(x, block, n_head, kv_cache=None):  # [n_seq, n_embd] -> [n_seq, n_embd]
     mlp, attn, ln_1, ln_2 = block['mlp'], block['attn'], block['ln_1'], block['ln_2']
@@ -220,7 +222,7 @@ def gpt2(inputs, params, n_head, kv_cache=None):  # [n_seq] -> [n_seq, n_vocab]
     positions = range(n_seq_past, n_seq_past + len(inputs))
 
     # token + positional embeddings
-    x = wte[inputs] + wpe[range(len(inputs))]  # [n_seq] -> [n_seq, n_embd]
+    x = wte[inputs] + wpe[positions]  # [n_seq] -> [n_seq, n_embd]
 
     x = torch.Tensor(x)
 
