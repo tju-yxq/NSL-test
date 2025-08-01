@@ -51,7 +51,7 @@ def layer_norm(x, g_b, eps:float = 1e-5):
     # layer_norm函数实现层归一化
     # 1. 计算均值和方差。
     mean = torch.mean(x, dim=-1, keepdim=True)
-    variance = torch.mean(x, dim=-1, keepdim=True, unbiased=False)
+    variance = torch.var(x, dim=-1, keepdim=True, unbiased=False)
     # 2. 归一化。根据 LayerNorm 公式 (x - mean) / sqrt(variance + eps)。
     #    eps 是为了防止方差为零导致除零错误。
     x_normalized = (x - mean) / torch.sqrt(variance + eps)
