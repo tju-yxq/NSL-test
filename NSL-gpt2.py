@@ -51,7 +51,7 @@ def layer_norm(x, g_b, eps:float = 1e-5):
     # layer_norm函数实现层归一化
     # 1. 计算均值和方差。
     mean = torch.mean(x, dim=-1, keepdim=True)
-    variance = torch.mean(x, dim=-1, keepdim=True, unbiased=False)
+    variance = torch.var(x, dim=-1, keepdim=True, unbiased=False)
     # 2. 归一化。根据 LayerNorm 公式 (x - mean) / sqrt(variance + eps)。
     #    eps 是为了防止方差为零导致除零错误。
     x_normalized = (x - mean) / torch.sqrt(variance + eps)
@@ -218,11 +218,12 @@ def generate(inputs, params, n_head, n_tokens_to_generate):
 
     return inputs[len(inputs) - n_tokens_to_generate :]  # only return generated ids
 
-def greedy_speculative_generate(inputs, draft_params, target_params, hparams_draft, hparams_target, n_tokens_to_generate, K):
-    
+
+def greedy_speculative_generate(inputs, draft_params, target_params, hparams_draft, hparams_target,
+                                n_tokens_to_generate, K):
     """
         Task: Load 124M and 1558M models at the same time, use greedy sampling, and complete speculative decoding
-    
+
         Inputs:
             inputs (list): The initial list of token IDs from the prompt.
             draft_params, target_params: Model weights for the draft and target models.
@@ -232,35 +233,109 @@ def greedy_speculative_generate(inputs, draft_params, target_params, hparams_dra
 
         Returns:
             list: A list of newly generated token IDs.
-            
+
     """
-    generated_ids = []
-    current_inputs = list(inputs)
+    from tqdm import tqdm
 
-    while len(generated_ids) < n_tokens_to_generate:
-        return generated_ids
+    # 投机性解码的核心实现
+    # 维护一个最终确认的 token 序列 `confirmed_ids`。
+    confirmed_ids = list(inputs)
 
+    pbar = tqdm(total=n_tokens_to_generate, desc="Speculative Generating")
 
-def main(prompt: str, n_tokens_to_generate: int = 5, model_size: str = "124M", models_dir: str = "models"):
+    while len(confirmed_ids) - len(inputs) < n_tokens_to_generate:
+
+        # 1. 草稿阶段
+        # ---------------------
+        # 让小模型从当前已确认的序列出发，连续生成 K 个草稿 token。
+        draft_ids = []
+        draft_inputs = list(confirmed_ids)  # 复制当前已确认的序列作为小模型的输入
+        for _ in range(K):
+            # 调用原始的 gpt2 函数进行自回归生成
+            logits_draft = gpt2(draft_inputs, draft_params, hparams_draft["n_head"])
+            next_id_draft = np.argmax(logits_draft[-1])
+            draft_inputs.append(int(next_id_draft))
+            draft_ids.append(int(next_id_draft))
+
+        # 2. 验证阶段
+        # -----------------------
+        # 让大模型进行并行计算来打分
+        verify_inputs = confirmed_ids + draft_ids
+        logits_target = gpt2(verify_inputs, target_params, hparams_target["n_head"])
+
+        # 我们只关心大模型对草稿部分的验证结果，所以我们只取最后 K 个 token 对应的 logits
+        target_predictions = np.argmax(logits_target[len(confirmed_ids) - 1:-1], axis=-1)
+
+        # 3. 接受/拒绝阶段 (Accept/Reject)
+        # -----------------------------
+        # 逐一比较草稿和专家的意见。
+        all_accepted = True
+        for i in range(K):
+            draft_token = draft_ids[i]
+            target_token = target_predictions[i]
+
+            if draft_token == target_token:
+                # 匹配成功，接受该 token
+                confirmed_ids.append(draft_token)
+                pbar.update(1)
+            else:
+                # 出现不匹配，接受专家（大模型）的意见，并立刻中止本轮核对
+                confirmed_ids.append(int(target_token))
+                pbar.update(1)
+                all_accepted = False
+                break
+
+        # 处理所有草稿都被接受的特殊情况。
+        # 根据论文，如果所有 K 个草稿都被接受了，我们可以直接采纳大模型预测的第 K+1 个词。
+        if all_accepted:
+            last_token_from_target = np.argmax(logits_target[-1])
+            confirmed_ids.append(int(last_token_from_target))
+            pbar.update(1)
+
+        # 检查是否已生成足够数量的 token
+        if len(confirmed_ids) - len(inputs) >= n_tokens_to_generate:
+            break
+
+    pbar.close()
+
+    # 返回新生成的部分
+    return confirmed_ids[len(inputs):]
+
+def main(prompt: str, n_tokens_to_generate: int = 50, K: int = 4, models_dir: str = "models"):
     from utils import load_encoder_hparams_and_params
 
-    # load encoder, hparams, and params from the released open-ai gpt-2 files
-    encoder, hparams, params = load_encoder_hparams_and_params(model_size, models_dir)
+    # 1. 加载小模型
+    print("Loading draft model ...")
+    encoder, hparams_draft, params_draft = load_encoder_hparams_and_params("355M", models_dir)
 
-    # encode the input string using the BPE tokenizer
+    # 2. 加载大模型
+    print("Loading target model ...")
+    # 注意：encoder 和 hparams 对于不同大小的模型是不同的，但分词器(encoder)是共享的
+    _, hparams_target, params_target = load_encoder_hparams_and_params("1558M", models_dir)
+
+    # 3. 对输入进行编码
     input_ids = encoder.encode(prompt)
 
-    # make sure we are not suring the max sequence length of our model
-    assert len(input_ids) + n_tokens_to_generate < hparams["n_ctx"]
+    # 确保序列长度不会超限
+    assert len(input_ids) + n_tokens_to_generate < hparams_target["n_ctx"]
 
-    # generate output ids
+    # 4. 调用投机性解码函数
     start = time.time()
-    output_ids = generate(input_ids, params, hparams["n_head"], n_tokens_to_generate)
+    output_ids = greedy_speculative_generate(
+        input_ids,
+        params_draft,
+        params_target,
+        hparams_draft,
+        hparams_target,
+        n_tokens_to_generate,
+        K
+    )
     end = time.time()
-    print(f"Time taken to generate {n_tokens_to_generate} tokens: {end - start:.2f}s")
+    print(f"\nTime taken for Speculative Sampling ({n_tokens_to_generate} tokens, K={K}): {end - start:.2f}s")
 
-    # decode the ids back into a string
+    # 5. 解码
     output_text = encoder.decode(output_ids)
+
     return output_text
 
 
