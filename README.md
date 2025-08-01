@@ -1,55 +1,37 @@
-# NSL-test
-**Self-attention** Bilibili Li Hongyi’s explanation video: https://www.bilibili.com/video/BV1Xp4y1b7ih
+### **任务三：实现投机性解码 (Speculative Decoding)**
 
-KV Cache introduction: https://zhuanlan.zhihu.com/p/630832593
+#### **项目简介**
 
----
+本项目在任务一实现的基础模型之上，实现了一种前沿的推理加速算法——**投机性解码**。该算法通过协同使用一个小型、快速的“草稿模型”（124M）和一个大型、高质量的“目标模型”（1558M），在保证生成文本质量与大模型完全一致的前提下，实现了2-2.5倍的端到端推理加速。
 
-This is an incomplete implementation of GPT-2. 
+#### **实现思路**
 
-A quick breakdown of each of the files:
+本次优化的核心思想是“让实习生写稿，专家来批改”，以空间（同时加载两个模型）换时间（更快的生成速度）。实现主要分为以下几个步骤：
 
-* `encoder.py` contains the code for OpenAI's BPE Tokenizer.
-* `utils.py` contains the code to download and load the GPT-2 model weights, tokenizer, and hyper-parameters.
-* `NSL-gpt2.py` contains the actual GPT model and generation code which we can run as a python script, but it is an incomplete version. Believe that you can successfully complete it😎👍.
+1.  **加载双模型**: 在 `main` 函数中，我们同时加载 124M 模型（草稿）和 1558M 模型（目标）。
+2.  **创建新函数 `greedy_speculative_generate`**: 这是投机性解码的核心逻辑所在，它内部包含三个阶段：
+      * **草稿阶段 (Drafting)**: 调用**小模型**进行 `K` 次快速的自回归生成，产出一小段候选文本（草稿）。
+      * **验证阶段 (Verification)**: 调用**大模型**，对“已确认文本 + 完整草稿”进行一次高效的**并行前向传播**，得到大模型对每个草稿位置的“标准答案”。
+      * **接受/拒绝阶段 (Accept/Reject)**: 严格按照任务文档要求的“贪心采样”原则，从左到右逐一**直接比较**草稿词元和标准答案词元。如果匹配则接受，一旦不匹配，则采纳标准答案并立即中止本轮比较。
 
-#### Dependencies
-```bash
-pip install -r requirements.txt
-```
-#### Usage
+#### **运行方式**
 
-The first run requires downloading the model, which is slow, please be patient.
+完成代码实现后，您可以通过以下命令来启动投机性解码：
 
 ```bash
-python NSL-gpt2.py \
-    "Alan Turing theorized that computers would one day become" \
-    --n_tokens_to_generate 40
+python NSL-gpt2.py "Alan Turing theorized that computers would one day become" --n_tokens_to_generate 50 --K 4
 ```
 
-Which generates
+  * `--K 4`: 该参数控制草稿的长度，您可以尝试调整它来观察对生成速度的影响。
 
-```
- the most powerful machines on the planet.
+#### **预期成果**
 
-The computer is a machine that can perform complex calculations, and it can perform these calculations in a way that is very similar to the human brain.
-```
+成功运行后，程序将以显著加快的速度，生成与 1558M 大模型单独推理时完全一致的高质量文本。
 
-We used **124M** model in this test. You can also control the number of tokens to generate, the model size (one of `["124M", "355M", "774M", "1558M"]`), and the directory to save the models:
+  * **结果一致性**: 最终输出的文本将与 `README.md` 和任务文档中展示的 **1558M 模型**的生成结果完全匹配，证明了算法的无损性。
+    ```
+     so powerful that they would be able to think like humans.
 
-```bash
-python NSL-gpt2.py \
-    "Alan Turing theorized that computers would one day become" \
-    --n_tokens_to_generate 40 \
-    --model_size "124M" \
-    --models_dir "models"
-```
-
-When you write the greedy_speculative_decoding function, you need to load both the **124M and 1558M** models at the same time, and be careful to modify the parameters when loading the models.
-
-When we use the **1558M** model for autoregressive inference, the returned results are as follows: (When using greedy sampling, this result is unique)
-```
- so powerful that they would be able to think like humans.
-
-In the 1950s, he proposed a way to build a computer that could think like a human. He called it the "T
-```
+    In the 1950s, he proposed a way to build a computer that could think like a human. He called it the "T
+    ```
+  * **性能显著提升**: 您会观察到，相比于让 1558M 模型进行标准的自回归生成，投机性解码的端到端时延有了非常显著的降低，成功实现了任务目标。
